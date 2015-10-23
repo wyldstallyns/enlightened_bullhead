@@ -1,6 +1,6 @@
 #
 # Automatically generated file; DO NOT EDIT.
-# Linux/arm64 3.10.73 Kernel Configuration
+# Linux/arm64 3.10.94 Kernel Configuration
 #
 CONFIG_ARM64=y
 CONFIG_64BIT=y
@@ -3938,9 +3938,5 @@ CONFIG_STRICT_MEMORY_RWX=y
 # CONFIG_ALUCARD_HOTPLUG is not set
 # CONFIG_BRICKED_HOTPLUG is not set
 CONFIG_INTELLI_PLUG=y
-# CONFIG_MSM_HOTPLUG is not set
-CONFIG_MSM_SLEEPER=y
 # CONFIG_THUNDERPLUG_CONTROL is not set
-# CONFIG_ZEN_DECISION is not set
-# CONFIG_ASMP is not set
-# CONFIG_MAKO_HOTPLUG is not set
+CONFIG_X_PLUG=y
