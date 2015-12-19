@@ -50,7 +50,6 @@ core-$(CONFIG_CRYPTO) += arch/arm64/crypto/
 core-$(CONFIG_INTELLI_PLUG)	+= arch/arm64/hotplug/INTELLIPLUG/
 core-$(CONFIG_ALUCARD_HOTPLUG)	+= arch/arm64/hotplug/ALUCARD/
 core-$(CONFIG_BRICKED_HOTPLUG)	+= arch/arm64/hotplug/BRICKED/
-core-$(CONFIG_MSM_HOTPLUG)	+= arch/arm64/hotplug/MSMHOTPLUG/
 core-$(CONFIG_MSM_SLEEPER)	+= arch/arm64/hotplug/MSMSLEEPER/
 core-$(CONFIG_THUNDERPLUG_CONTROL)	+= arch/arm64/hotplug/THUNDERPLUG/
 core-$(CONFIG_X_PLUG)	+= arch/arm64/hotplug/X-PLUG/
