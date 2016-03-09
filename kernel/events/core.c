@@ -6938,7 +6938,7 @@ SYSCALL_DEFINE5(perf_event_open,
 	if (err)
 		return err;
 	
-	if (attr.constraint_duplicate || attr._reserved_1)
+	if (attr.constraint_duplicate || attr.__reserved_1)
 		return -EINVAL;
 
 	if (!attr.exclude_kernel) {
