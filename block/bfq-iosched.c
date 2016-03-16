@@ -70,9 +70,6 @@
 #include "bfq.h"
 #include "blk.h"
 
-/* Max number of dispatches in one round of service. */
-static const int bfq_quantum = 4;
-
 /* Expiration time of sync (0) and async (1) requests, in jiffies. */
 static const int bfq_fifo_expire[2] = { HZ / 4, HZ / 8 };
 
@@ -383,7 +380,6 @@ static void bfq_rq_pos_tree_add(struct bfq_data *bfqd, struct bfq_queue *bfqq)
  */
 static inline bool bfq_differentiated_weights(struct bfq_data *bfqd)
 {
-	BUG_ON(!bfqd->hw_tag);
 	/*
 	 * For weights to differ, at least one of the trees must contain
 	 * at least two nodes.
@@ -420,20 +416,19 @@ static void bfq_weights_tree_add(struct bfq_data *bfqd,
 	struct rb_node **new = &(root->rb_node), *parent = NULL;
 
 	/*
-	 * Do not insert if:
-	 * - the device does not support queueing;
-	 * - the entity is already associated with a counter, which happens if:
-	 *   1) the entity is associated with a queue, 2) a request arrival
-	 *   has caused the queue to become both non-weight-raised, and hence
-	 *   change its weight, and backlogged; in this respect, each
-	 *   of the two events causes an invocation of this function,
-	 *   3) this is the invocation of this function caused by the second
-	 *   event. This second invocation is actually useless, and we handle
-	 *   this fact by exiting immediately. More efficient or clearer
-	 *   solutions might possibly be adopted.
+	 * Do not insert if the entity is already associated with a
+	 * counter, which happens if:
+	 *   1) the entity is associated with a queue,
+	 *   2) a request arrival has caused the queue to become both
+	 *      non-weight-raised, and hence change its weight, and
+	 *      backlogged; in this respect, each of the two events
+	 *      causes an invocation of this function,
+	 *   3) this is the invocation of this function caused by the
+	 *      second event. This second invocation is actually useless,
+	 *      and we handle this fact by exiting immediately. More
+	 *      efficient or clearer solutions might possibly be adopted.
 	 */
-	if (!bfqd->hw_tag || entity->weight_counter)
-
+	if (entity->weight_counter)
 		return;
 
 	while (*new) {
@@ -1470,7 +1465,6 @@ bfq_setup_cooperator(struct bfq_data *bfqd, struct bfq_queue *bfqq,
 check_scheduled:
 	new_bfqq = bfq_close_cooperator(bfqd, bfqq,
 					bfq_io_struct_pos(io_struct, request));
-
 	if (new_bfqq && likely(new_bfqq != &bfqd->oom_bfqq))
 		return bfq_setup_merge(bfqq, new_bfqq);
 
@@ -2483,14 +2477,6 @@ static inline int bfq_may_expire_for_budg_timeout(struct bfq_queue *bfqq)
 static inline bool bfq_bfqq_must_not_expire(struct bfq_queue *bfqq)
 {
 	struct bfq_data *bfqd = bfqq->bfqd;
-
-	#ifdef CONFIG_CGROUP_BFQIO
-#define symmetric_scenario	  (!bfqd->active_numerous_groups && \
-				   !bfq_differentiated_weights(bfqd))
-#else
-#define symmetric_scenario	  (!bfq_differentiated_weights(bfqd))
-#endif
-
 #define cond_for_seeky_on_ncq_hdd (bfq_bfqq_constantly_seeky(bfqq) && \
 				   bfqd->busy_in_flight_queues == \
 				   bfqd->const_seeky_busy_in_flight_queues)
@@ -2506,7 +2492,6 @@ static inline bool bfq_bfqq_must_not_expire(struct bfq_queue *bfqq)
  */
 #define cond_for_expiring_non_wr  (bfqd->hw_tag && \
 				   (bfqd->wr_busy_queues > 0 || \
-				   
 				    (blk_queue_nonrot(bfqd->queue) || \
 				      cond_for_seeky_on_ncq_hdd)))
 
@@ -2951,8 +2936,7 @@ static void bfq_exit_icq(struct io_cq *icq)
  * Update the entity prio values; note that the new values will not
  * be used until the next (re)activation.
  */
-
- static void bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
+static void bfq_set_next_ioprio_data(struct bfq_queue *bfqq, struct bfq_io_cq *bic)
 {
 	struct task_struct *tsk = current;
 	int ioprio_class;
@@ -2984,12 +2968,18 @@ static void bfq_exit_icq(struct io_cq *icq)
 		break;
 	}
 
-	bfqq->entity.ioprio_changed = 1;
+	if (bfqq->entity.new_ioprio < 0 ||
+	    bfqq->entity.new_ioprio >= IOPRIO_BE_NR) {
+		printk(KERN_CRIT "bfq_set_next_ioprio_data: new_ioprio %d\n",
+				 bfqq->entity.new_ioprio);
+		BUG();
+	}
 
-	bfq_clear_bfqq_prio_changed(bfqq);
+	bfqq->entity.new_weight = bfq_ioprio_to_weight(bfqq->entity.new_ioprio);
+	bfqq->entity.ioprio_changed = 1;
 }
 
-static void bfq_changed_ioprio(struct bfq_io_cq *bic)
+static void bfq_check_ioprio_change(struct bfq_io_cq *bic)
 {
 	struct bfq_data *bfqd;
 	struct bfq_queue *bfqq, *new_bfqq;
@@ -3007,6 +2997,7 @@ static void bfq_changed_ioprio(struct bfq_io_cq *bic)
 		goto out;
 
 	bic->ioprio = ioprio;
+
 	bfqq = bic->bfqq[BLK_RW_ASYNC];
 	if (bfqq != NULL) {
 		bfqg = container_of(bfqq->entity.sched_data, struct bfq_group,
@@ -3026,13 +3017,11 @@ static void bfq_changed_ioprio(struct bfq_io_cq *bic)
 	if (bfqq != NULL)
 		bfq_set_next_ioprio_data(bfqq, bic);
 
-
 out:
 	bfq_put_bfqd_unlock(bfqd, &flags);
 }
 
 static void bfq_init_bfqq(struct bfq_data *bfqd, struct bfq_queue *bfqq,
-			  pid_t pid, int is_sync)
 			  struct bfq_io_cq *bic, pid_t pid, int is_sync)
 {
 	RB_CLEAR_NODE(&bfqq->entity.rb_node);
@@ -3373,8 +3362,6 @@ static void bfq_insert_request(struct request_queue *q, struct request *rq)
 			bfq_bfqq_increase_failed_cooperations(bfqq);
 	}
 
-	bfq_init_prio_data(bfqq, RQ_BIC(rq));
-
 	bfq_add_request(rq);
 
 	/*
@@ -3518,7 +3505,6 @@ static int bfq_may_queue(struct request_queue *q, int rw)
 		return ELV_MQUEUE_MAY;
 
 	bfqq = bic_to_bfqq(bic, rw_is_sync(rw));
-
 	if (bfqq != NULL)
 		return __bfq_may_queue(bfqq);
 
@@ -3641,7 +3627,6 @@ new_queue:
 	 * queue has just been split, mark a flag so that the
 	 * information is available to the other scheduler hooks.
 	 */
-
 	if (likely(bfqq != &bfqd->oom_bfqq) && bfqq_process_refs(bfqq) == 1) {
 		bfqq->bic = bic;
 		if (split) {
@@ -3816,7 +3801,6 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_type *e)
 	 * Grab a permanent reference to it, so that the normal code flow
 	 * will not attempt to free it.
 	 */
-
 	bfq_init_bfqq(bfqd, &bfqd->oom_bfqq, NULL, 1, 0);
 	atomic_inc(&bfqd->oom_bfqq.ref);
 	bfqd->oom_bfqq.entity.new_ioprio = BFQ_DEFAULT_QUEUE_IOPRIO;
@@ -3867,8 +3851,6 @@ static int bfq_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	bfqd->bfq_max_budget = bfq_default_max_budget;
 
-
-	bfqd->bfq_quantum = bfq_quantum;
 	bfqd->bfq_fifo_expire[0] = bfq_fifo_expire[0];
 	bfqd->bfq_fifo_expire[1] = bfq_fifo_expire[1];
 	bfqd->bfq_back_max = bfq_back_max;
@@ -4002,7 +3984,6 @@ static ssize_t __FUNC(struct elevator_queue *e, char *page)		\
 		__data = jiffies_to_msecs(__data);			\
 	return bfq_var_show(__data, (page));				\
 }
-SHOW_FUNCTION(bfq_quantum_show, bfqd->bfq_quantum, 0);
 SHOW_FUNCTION(bfq_fifo_expire_sync_show, bfqd->bfq_fifo_expire[1], 1);
 SHOW_FUNCTION(bfq_fifo_expire_async_show, bfqd->bfq_fifo_expire[0], 1);
 SHOW_FUNCTION(bfq_back_seek_max_show, bfqd->bfq_back_max, 0);
@@ -4039,7 +4020,6 @@ __FUNC(struct elevator_queue *e, const char *page, size_t count)	\
 		*(__PTR) = __data;					\
 	return ret;							\
 }
-STORE_FUNCTION(bfq_quantum_store, &bfqd->bfq_quantum, 1, INT_MAX, 0);
 STORE_FUNCTION(bfq_fifo_expire_sync_store, &bfqd->bfq_fifo_expire[1], 1,
 		INT_MAX, 1);
 STORE_FUNCTION(bfq_fifo_expire_async_store, &bfqd->bfq_fifo_expire[0], 1,
@@ -4140,7 +4120,6 @@ static ssize_t bfq_low_latency_store(struct elevator_queue *e,
 	__ATTR(name, S_IRUGO|S_IWUSR, bfq_##name##_show, bfq_##name##_store)
 
 static struct elv_fs_entry bfq_attrs[] = {
-	BFQ_ATTR(quantum),
 	BFQ_ATTR(fifo_expire_sync),
 	BFQ_ATTR(fifo_expire_async),
 	BFQ_ATTR(back_seek_max),
@@ -4222,6 +4201,7 @@ static int __init bfq_init(void)
 
 	elv_register(&iosched_bfq);
 	pr_info("BFQ I/O-scheduler: v7r8");
+
 	return 0;
 }
 
@@ -4236,3 +4216,4 @@ module_exit(bfq_exit);
 
 MODULE_AUTHOR("Fabio Checconi, Paolo Valente");
 MODULE_LICENSE("GPL");
+
