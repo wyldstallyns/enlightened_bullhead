@@ -1,6 +1,10 @@
 ARCH=um
 SUBARCH=x86_64
+<<<<<<< HEAD
 BRANCH=android-msm-bullhead-3.10-mnc-mr1
+=======
+BRANCH=android-msm-bullhead-3.10-mdr-1.6
+>>>>>>> 1007fdc
 CROSS_COMPILE=
 DEFCONFIG=net_test_defconfig
 EXTRA_CMDS=''
