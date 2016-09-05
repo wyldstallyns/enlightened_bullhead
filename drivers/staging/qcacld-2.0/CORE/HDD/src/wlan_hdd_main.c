@@ -2052,8 +2052,9 @@ eHalStatus hdd_parse_plm_cmd(tANI_U8 *pValue, tSirPlmReq *pPlmRequest)
         if (content < 0)
            return eHAL_STATUS_FAILURE;
 
+        content = VOS_MIN(content, WNI_CFG_VALID_CHANNEL_LIST_LEN);
         pPlmRequest->plmNumCh = content;
-        hddLog(VOS_TRACE_LEVEL_DEBUG, "numch %d", pPlmRequest->plmNumCh);
+        hddLog(LOG1, FL("Numch: %d"), pPlmRequest->plmNumCh);
 
         /* Channel numbers */
         for (count = 0; count < pPlmRequest->plmNumCh; count++)
@@ -2071,10 +2072,9 @@ eHalStatus hdd_parse_plm_cmd(tANI_U8 *pValue, tSirPlmReq *pPlmRequest)
              if (1 != ret) return eHAL_STATUS_FAILURE;
 
              ret = kstrtos32(buf, 10, &content);
-             if ( ret < 0) return eHAL_STATUS_FAILURE;
-
-             if (content <= 0)
-                return eHAL_STATUS_FAILURE;
+             if (ret < 0 || content <= 0 ||
+                 content > WNI_CFG_CURRENT_CHANNEL_STAMAX)
+                 return eHAL_STATUS_FAILURE;
 
              pPlmRequest->plmChList[count]= content;
              hddLog(VOS_TRACE_LEVEL_DEBUG, " ch- %d",
@@ -4318,11 +4318,11 @@ static int hdd_driver_command(hdd_adapter_t *pAdapter,
        {
            tANI_U8 *value = command;
            eHalStatus status = eHAL_STATUS_SUCCESS;
-           tpSirPlmReq pPlmRequest = NULL;
+           tpSirPlmReq pPlmRequest;
 
            pPlmRequest = vos_mem_malloc(sizeof(tSirPlmReq));
            if (NULL == pPlmRequest){
-               ret = -EINVAL;
+               ret = -ENOMEM;
                goto exit;
            }
 
@@ -5315,100 +5315,94 @@ static VOS_STATUS hdd_parse_ese_beacon_req(tANI_U8 *pValue,
                                      tCsrEseBeaconReq *pEseBcnReq)
 {
     tANI_U8 *inPtr = pValue;
-    int tempInt = 0;
+    uint8_t input = 0;
+    uint32_t tempInt = 0;
     int j = 0, i = 0, v = 0;
     char buf[32];
 
     inPtr = strnchr(pValue, strlen(pValue), SPACE_ASCII_VALUE);
-    /*no argument after the command*/
-    if (NULL == inPtr)
-    {
+    /* no argument after the command */
+    if (NULL == inPtr) {
         return -EINVAL;
-    }
-    /*no space after the command*/
-    else if (SPACE_ASCII_VALUE != *inPtr)
-    {
+    } else if (SPACE_ASCII_VALUE != *inPtr) {
+        /* no space after the command */
         return -EINVAL;
     }
 
-    /*removing empty spaces*/
+    /* removing empty spaces */
     while ((SPACE_ASCII_VALUE  == *inPtr) && ('\0' !=  *inPtr)) inPtr++;
 
-    /*no argument followed by spaces*/
+    /* no argument followed by spaces */
     if ('\0' == *inPtr) return -EINVAL;
 
-    /*getting the first argument ie measurement token*/
+    /* Getting the first argument ie Number of IE fields */
     v = sscanf(inPtr, "%31s ", buf);
     if (1 != v) return -EINVAL;
 
-    v = kstrtos32(buf, 10, &tempInt);
-    if ( v < 0) return -EINVAL;
+    v = kstrtou8(buf, 10, &input);
+    if (v < 0) return -EINVAL;
 
-    pEseBcnReq->numBcnReqIe = tempInt;
+    input = VOS_MIN(input, SIR_ESE_MAX_MEAS_IE_REQS);
+    pEseBcnReq->numBcnReqIe = input;
 
-    VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO_HIGH,
-               "Number of Bcn Req Ie fields(%d)", pEseBcnReq->numBcnReqIe);
+    hddLog(LOG1, "Number of Bcn Req Ie fields: %d", pEseBcnReq->numBcnReqIe);
 
-    for (j = 0; j < (pEseBcnReq->numBcnReqIe); j++)
-    {
-        for (i = 0; i < 4; i++)
-        {
-            /*inPtr pointing to the beginning of first space after number of ie fields*/
+    for (j = 0; j < (pEseBcnReq->numBcnReqIe); j++) {
+        for (i = 0; i < 4; i++) {
+            /* inPtr pointing to the beginning of first space after number of
+               ie fields */
             inPtr = strpbrk( inPtr, " " );
-            /*no ie data after the number of ie fields argument*/
+            /* no ie data after the number of ie fields argument */
             if (NULL == inPtr) return -EINVAL;
 
-            /*removing empty space*/
+            /* removing empty space */
             while ((SPACE_ASCII_VALUE == *inPtr) && ('\0' != *inPtr)) inPtr++;
 
-            /*no ie data after the number of ie fields argument and spaces*/
-            if ( '\0' == *inPtr ) return -EINVAL;
+            /* no ie data after the number of ie fields argument and spaces */
+            if ('\0' == *inPtr) return -EINVAL;
 
             v = sscanf(inPtr, "%31s ", buf);
             if (1 != v) return -EINVAL;
 
-            v = kstrtos32(buf, 10, &tempInt);
+            v = kstrtou32(buf, 10, &tempInt);
             if (v < 0) return -EINVAL;
 
-            switch (i)
-            {
-                case 0:  /* Measurement token */
-                if (tempInt <= 0)
-                {
+            switch (i) {
+            case 0:  /* Measurement token */
+                if (!tempInt) {
                    VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                             "Invalid Measurement Token(%d)", tempInt);
+                             "Invalid Measurement Token: %d", tempInt);
                    return -EINVAL;
                 }
                 pEseBcnReq->bcnReq[j].measurementToken = tempInt;
                 break;
 
-                case 1:  /* Channel number */
-                if ((tempInt <= 0) ||
-                    (tempInt > WNI_CFG_CURRENT_CHANNEL_STAMAX))
-                {
+            case 1:  /* Channel number */
+                if ((!tempInt) ||
+                    (tempInt > WNI_CFG_CURRENT_CHANNEL_STAMAX)) {
                    VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                             "Invalid Channel Number(%d)", tempInt);
+                             "Invalid Channel Number: %d", tempInt);
                    return -EINVAL;
                 }
                 pEseBcnReq->bcnReq[j].channel = tempInt;
                 break;
 
-                case 2:  /* Scan mode */
-                if ((tempInt < eSIR_PASSIVE_SCAN) || (tempInt > eSIR_BEACON_TABLE))
-                {
+            case 2:  /* Scan mode */
+                if ((tempInt < eSIR_PASSIVE_SCAN) ||
+                    (tempInt > eSIR_BEACON_TABLE)) {
                    VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                             "Invalid Scan Mode(%d) Expected{0|1|2}", tempInt);
+                             "Invalid Scan Mode: %d Expected{0|1|2}", tempInt);
                    return -EINVAL;
                 }
                 pEseBcnReq->bcnReq[j].scanMode= tempInt;
                 break;
 
-                case 3:  /* Measurement duration */
-                if (((tempInt <= 0) && (pEseBcnReq->bcnReq[j].scanMode != eSIR_BEACON_TABLE)) ||
-                    ((tempInt < 0) && (pEseBcnReq->bcnReq[j].scanMode == eSIR_BEACON_TABLE)))
-                {
+            case 3:  /* Measurement duration */
+                if (((!tempInt) &&
+                    (pEseBcnReq->bcnReq[j].scanMode != eSIR_BEACON_TABLE)) ||
+                    ((pEseBcnReq->bcnReq[j].scanMode == eSIR_BEACON_TABLE))) {
                    VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_ERROR,
-                             "Invalid Measurement Duration(%d)", tempInt);
+                             "Invalid Measurement Duration: %d", tempInt);
                    return -EINVAL;
                 }
                 pEseBcnReq->bcnReq[j].measurementDuration = tempInt;
@@ -5417,8 +5411,7 @@ static VOS_STATUS hdd_parse_ese_beacon_req(tANI_U8 *pValue,
         }
     }
 
-    for (j = 0; j < pEseBcnReq->numBcnReqIe; j++)
-    {
+    for (j = 0; j < pEseBcnReq->numBcnReqIe; j++) {
         VOS_TRACE( VOS_MODULE_ID_HDD, VOS_TRACE_LEVEL_INFO,
                    "Index(%d) Measurement Token(%u) Channel(%u) Scan Mode(%u) Measurement Duration(%u)",
                    j,

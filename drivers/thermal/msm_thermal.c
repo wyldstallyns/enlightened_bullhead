@@ -92,7 +92,7 @@ module_param(temp_threshold, int, 0644);
 
 static struct msm_thermal_data msm_thermal_info;
 static struct delayed_work check_temp_work;
-static bool core_control_enabled = 1;
+static bool core_control_enabled;
 static uint32_t cpus_offlined;
 static cpumask_var_t cpus_previously_online;
 static DEFINE_MUTEX(core_control_mutex);
@@ -2988,8 +2988,7 @@ static int __ref msm_thermal_cpu_callback(struct notifier_block *nfb,
 {
 	uint32_t cpu = (uintptr_t)hcpu;
 
-	switch (action & ~CPU_TASKS_FROZEN) {
-	case CPU_UP_PREPARE:
+	if (action == CPU_UP_PREPARE || action == CPU_UP_PREPARE_FROZEN) {
 		if (!cpumask_test_and_set_cpu(cpu, cpus_previously_online))
 			pr_debug("Total prev cores online tracked %u\n",
 				cpumask_weight(cpus_previously_online));
@@ -3000,32 +2999,11 @@ static int __ref msm_thermal_cpu_callback(struct notifier_block *nfb,
 				cpu);
 			return NOTIFY_BAD;
 		}
-		break;
-	case CPU_DOWN_PREPARE:
+	} else if (action == CPU_DOWN_PREPARE ||
+				action == CPU_DOWN_PREPARE_FROZEN) {
 		if (!cpumask_test_and_set_cpu(cpu, cpus_previously_online))
 			pr_debug("Total prev cores online tracked %u\n",
 				cpumask_weight(cpus_previously_online));
-		break;
-	case CPU_ONLINE:
-		if (core_control_enabled &&
-			(msm_thermal_info.core_control_mask & BIT(cpu)) &&
-			(cpus_offlined & BIT(cpu))) {
-			if (hotplug_task) {
-				pr_debug("Re-evaluate and hotplug CPU%d\n",
-					cpu);
-				complete(&hotplug_notify_complete);
-			} else {
-				/*
-				 * This will be auto-corrected next time
-				 * do_core_control() is called
-				 */
-				pr_err("CPU%d online, after thermal veto\n",
-					cpu);
-			}
-		}
-		break;
-	default:
-		break;
 	}
 
 	pr_debug("voting for CPU%d to be online\n", cpu);
@@ -4206,10 +4184,7 @@ static ssize_t show_cc_enabled(struct kobject *kobj,
 static ssize_t __ref store_cc_enabled(struct kobject *kobj,
 		struct kobj_attribute *attr, const char *buf, size_t count)
 {
-	// Disable Core Control. Let the hotplug driver deal with this
-	core_control_enabled = 1;
-
-	/*int ret = 0;
+	int ret = 0;
 	int val = 0;
 	uint32_t cpu = 0;
 
@@ -4227,7 +4202,10 @@ static ssize_t __ref store_cc_enabled(struct kobject *kobj,
 		pr_info("Core control enabled\n");
 		cpus_previously_online_update();
 		register_cpu_notifier(&msm_thermal_cpu_notifier);
-		 
+		/*
+		 * Re-evaluate thermal core condition, update current status
+		 * and set threshold for all cpus.
+		 */
 		hotplug_init_cpu_offlined();
 		mutex_lock(&core_control_mutex);
 		update_offline_cores(cpus_offlined);
@@ -4246,7 +4224,7 @@ static ssize_t __ref store_cc_enabled(struct kobject *kobj,
 		unregister_cpu_notifier(&msm_thermal_cpu_notifier);
 	}
 
-done_store_cc:*/
+done_store_cc:
 	return count;
 }
 

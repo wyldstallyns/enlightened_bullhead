@@ -166,9 +166,12 @@ static struct srcu_struct pmus_srcu;
  *   0 - disallow raw tracepoint access for unpriv
  *   1 - disallow cpu events for unpriv
  *   2 - disallow kernel profiling for unpriv
+ *   3 - disallow all unpriv perf event use
  */
 #ifdef CONFIG_PERF_EVENTS_USERMODE
 int sysctl_perf_event_paranoid __read_mostly = -1;
+/* #elif CONFIG_SECURITY_PERF_EVENTS_RESTRICT */
+int sysctl_perf_event_paranoid __read_mostly = 3;
 #else
 int sysctl_perf_event_paranoid __read_mostly = 1;
 #endif
@@ -199,8 +202,6 @@ void update_perf_cpu_limits(void)
 	do_div(tmp, 100);
 	atomic_set(&perf_sample_allowed_ns, tmp);
 }
-
-static int perf_rotate_context(struct perf_cpu_context *cpuctx);
 
 int perf_proc_update_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
@@ -754,98 +755,6 @@ perf_cgroup_mark_enabled(struct perf_event *event,
 {
 }
 #endif
-
-/*
- * set default to be dependent on timer tick just
- * like original code
- */
-#define PERF_CPU_HRTIMER (1000 / HZ)
-/*
- * function must be called with interrupts disbled
- */
-static enum hrtimer_restart perf_cpu_hrtimer_handler(struct hrtimer *hr)
-{
-	struct perf_cpu_context *cpuctx;
-	enum hrtimer_restart ret = HRTIMER_NORESTART;
-	int rotations = 0;
-
-	WARN_ON(!irqs_disabled());
-
-	cpuctx = container_of(hr, struct perf_cpu_context, hrtimer);
-
-	rotations = perf_rotate_context(cpuctx);
-
-	/*
-	 * arm timer if needed
-	 */
-	if (rotations) {
-		hrtimer_forward_now(hr, cpuctx->hrtimer_interval);
-		ret = HRTIMER_RESTART;
-	}
-
-	return ret;
-}
-
-/* CPU is going down */
-void perf_cpu_hrtimer_cancel(int cpu)
-{
-	struct perf_cpu_context *cpuctx;
-	struct pmu *pmu;
-	unsigned long flags;
-
-	if (WARN_ON(cpu != smp_processor_id()))
-		return;
-
-	local_irq_save(flags);
-
-	rcu_read_lock();
-
-	list_for_each_entry_rcu(pmu, &pmus, entry) {
-		cpuctx = this_cpu_ptr(pmu->pmu_cpu_context);
-
-		if (pmu->task_ctx_nr == perf_sw_context)
-			continue;
-
-		hrtimer_cancel(&cpuctx->hrtimer);
-	}
-
-	rcu_read_unlock();
-
-	local_irq_restore(flags);
-}
-
-static void __perf_cpu_hrtimer_init(struct perf_cpu_context *cpuctx, int cpu)
-{
-	struct hrtimer *hr = &cpuctx->hrtimer;
-	struct pmu *pmu = cpuctx->ctx.pmu;
-
-	/* no multiplexing needed for SW PMU */
-	if (pmu->task_ctx_nr == perf_sw_context)
-		return;
-
-	cpuctx->hrtimer_interval =
-		ns_to_ktime(NSEC_PER_MSEC * PERF_CPU_HRTIMER);
-
-	hrtimer_init(hr, CLOCK_MONOTONIC, HRTIMER_MODE_REL_PINNED);
-	hr->function = perf_cpu_hrtimer_handler;
-}
-
-static void perf_cpu_hrtimer_restart(struct perf_cpu_context *cpuctx)
-{
-	struct hrtimer *hr = &cpuctx->hrtimer;
-	struct pmu *pmu = cpuctx->ctx.pmu;
-
-	/* not for SW PMU */
-	if (pmu->task_ctx_nr == perf_sw_context)
-		return;
-
-	if (hrtimer_active(hr))
-		return;
-
-	if (!hrtimer_callback_running(hr))
-		__hrtimer_start_range_ns(hr, cpuctx->hrtimer_interval,
-					 0, HRTIMER_MODE_REL_PINNED, 0);
-}
 
 void perf_pmu_disable(struct pmu *pmu)
 {
@@ -1771,7 +1680,6 @@ group_sched_in(struct perf_event *group_event,
 
 	if (event_sched_in(group_event, cpuctx, ctx)) {
 		pmu->cancel_txn(pmu);
-		perf_cpu_hrtimer_restart(cpuctx);
 		return -EAGAIN;
 	}
 
@@ -1817,8 +1725,6 @@ group_error:
 	event_sched_out(group_event, cpuctx, ctx);
 
 	pmu->cancel_txn(pmu);
-
-	perf_cpu_hrtimer_restart(cpuctx);
 
 	return -EAGAIN;
 }
@@ -2089,10 +1995,8 @@ static int __perf_event_enable(void *info)
 		 * If this event can't go on and it's part of a
 		 * group, then the whole group has to come off.
 		 */
-		if (leader != event) {
+		if (leader != event)
 			group_sched_out(leader, cpuctx, ctx);
-			perf_cpu_hrtimer_restart(cpuctx);
-		}
 		if (leader->attr.pinned) {
 			update_group_times(leader);
 			leader->state = PERF_EVENT_STATE_ERROR;
@@ -2836,7 +2740,7 @@ static void rotate_ctx(struct perf_event_context *ctx)
  * because they're strictly cpu affine and rotate_start is called with IRQs
  * disabled, while rotate_context is called from IRQ context.
  */
-static int perf_rotate_context(struct perf_cpu_context *cpuctx)
+static void perf_rotate_context(struct perf_cpu_context *cpuctx)
 {
 	struct perf_event_context *ctx = NULL;
 	int rotate = 0, remove = 1;
@@ -2875,8 +2779,6 @@ static int perf_rotate_context(struct perf_cpu_context *cpuctx)
 done:
 	if (remove)
 		list_del_init(&cpuctx->rotation_list);
-
-	return rotate;
 }
 
 #ifdef CONFIG_NO_HZ_FULL
@@ -2908,6 +2810,10 @@ void perf_event_task_tick(void)
 		ctx = cpuctx->task_ctx;
 		if (ctx)
 			perf_adjust_freq_unthr_context(ctx, throttled);
+
+		if (cpuctx->jiffies_interval == 1 ||
+				!(jiffies % cpuctx->jiffies_interval))
+			perf_rotate_context(cpuctx);
 	}
 }
 
@@ -5663,7 +5569,7 @@ static int perf_swevent_add(struct perf_event *event, int flags)
 static void perf_swevent_del(struct perf_event *event, int flags)
 {
 	if(!hlist_unhashed(&event->hlist_entry))
-			hlist_del_rcu(&event->hlist_entry);
+		hlist_del_rcu(&event->hlist_entry);
 }
 
 static void perf_swevent_start(struct perf_event *event, int flags)
@@ -6462,9 +6368,7 @@ skip_type:
 		lockdep_set_class(&cpuctx->ctx.lock, &cpuctx_lock);
 		cpuctx->ctx.type = cpu_context;
 		cpuctx->ctx.pmu = pmu;
-
-		__perf_cpu_hrtimer_init(cpuctx, cpu);
-
+		cpuctx->jiffies_interval = 1;
 		INIT_LIST_HEAD(&cpuctx->rotation_list);
 		cpuctx->unique_pmu = pmu;
 	}
@@ -6938,12 +6842,12 @@ SYSCALL_DEFINE5(perf_event_open,
 	if (flags & ~PERF_FLAG_ALL)
 		return -EINVAL;
 
+	if (perf_paranoid_any() && !capable(CAP_SYS_ADMIN))
+		return -EACCES;
+
 	err = perf_copy_attr(attr_uptr, &attr);
 	if (err)
 		return err;
-	
-	if (attr.constraint_duplicate || attr.__reserved_1)
-		return -EINVAL;
 
 	if (attr.constraint_duplicate || attr.__reserved_1)
 		return -EINVAL;
